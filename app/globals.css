@@ -1,0 +1,106 @@
+:root {
+  --bg: #ffffff;
+  --fg: #101010;
+  --muted: #585858;
+  --line: #dddddd;
+  --panel: #f6f6f6;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: Inter, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  line-height: 1.5;
+}
+
+a { color: inherit; text-decoration: none; }
+
+.container { width: min(1120px, 92%); margin: 0 auto; }
+.section { padding: 4.5rem 0; }
+.section-alt { background: var(--panel); }
+.stack-lg { display: grid; gap: 2rem; }
+
+.site-header { border-bottom: 1px solid var(--line); background: #fff; position: sticky; top: 0; z-index: 20; }
+.nav-wrap { min-height: 76px; display: flex; align-items: center; justify-content: space-between; }
+.wordmark { font-size: 1.25rem; font-weight: 800; letter-spacing: 0.2em; }
+.wordmark.small { font-size: 1rem; }
+.nav-list { list-style: none; display: flex; gap: 1.5rem; padding: 0; margin: 0; font-weight: 600; }
+
+.hero { padding-top: 6rem; }
+.hero-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 2rem; align-items: stretch; }
+.eyebrow { text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 700; }
+h1, h2, h3 { line-height: 1.2; margin-top: 0; }
+h1 { font-size: clamp(2rem, 4vw, 3.1rem); margin-bottom: 1rem; }
+.lead { color: var(--muted); font-size: 1.1rem; max-width: 60ch; }
+.hero-panel { background: #101010; color: #fff; border-radius: 12px; padding: 2rem; display: grid; align-content: center; }
+
+.cta-row { display: flex; gap: 1rem; margin-top: 1.5rem; flex-wrap: wrap; }
+.btn { display: inline-block; padding: 0.75rem 1.2rem; border-radius: 8px; font-weight: 700; border: 1px solid #101010; }
+.btn-primary { background: #101010; color: #fff; }
+.btn-secondary { background: #fff; color: #101010; }
+.text-link { font-weight: 700; }
+
+.cards-2, .cards-3 { display: grid; gap: 1rem; }
+.cards-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cards-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.card { border: 1px solid var(--line); border-radius: 12px; padding: 1.25rem; background: #fff; }
+
+.section-head { margin-bottom: 1.5rem; }
+.filters { display: flex; gap: 0.7rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.filters button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 0.4rem 0.9rem;
+  font-weight: 600;
+}
+.filters .active { background: #101010; color: #fff; border-color: #101010; }
+
+.jobs-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+.jobs-grid.compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.job-card { border: 1px solid var(--line); border-radius: 12px; padding: 1rem; background: #fff; }
+.job-card ul { padding-left: 1.1rem; margin: 0.8rem 0 0; }
+.chip { font-weight: 700; color: var(--muted); font-size: 0.85rem; letter-spacing: 0.03em; }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.form { margin-top: 1rem; display: grid; gap: 1rem; }
+.field-grid { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+label { display: grid; gap: 0.4rem; font-weight: 600; font-size: 0.95rem; }
+input, textarea, select {
+  width: 100%;
+  border: 1px solid #b8b8b8;
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+  font: inherit;
+  background: #fff;
+}
+select { color: #101010; }
+input:focus, textarea:focus, select:focus { outline: 2px solid #101010; outline-offset: 1px; border-color: #101010; }
+.submit-row { display: grid; gap: 0.6rem; }
+.submit-row button {
+  justify-self: start;
+  padding: 0.75rem 1.2rem;
+  border: none;
+  border-radius: 8px;
+  background: #101010;
+  color: #fff;
+  font-weight: 700;
+}
+.error { color: #c30000; font-size: 0.85rem; margin: 0; }
+.success { color: #166534; font-size: 0.92rem; margin: 0; }
+
+.contact-strip { text-align: center; }
+.site-footer { border-top: 1px solid var(--line); padding: 2rem 0 2.4rem; }
+.footer-grid { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+@media (max-width: 960px) {
+  .hero-grid, .split, .cards-3, .jobs-grid, .jobs-grid.compact { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 700px) {
+  .nav-wrap { flex-direction: column; justify-content: center; gap: 0.8rem; padding: 0.8rem 0; }
+  .hero-grid, .split, .cards-2, .cards-3, .jobs-grid, .jobs-grid.compact, .field-grid, .footer-grid { grid-template-columns: 1fr; }
+  .section { padding: 3rem 0; }
+}
