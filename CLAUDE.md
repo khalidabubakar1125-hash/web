@@ -7,17 +7,25 @@ Claude Code reads it automatically at session start.
 
 ## About the User
 
+- **Name:** Khalid Abubakar
 - **Email:** khalidabubakar1125@gmail.com
-- **Project owner:** Sentinel Recruitment Group website
+- **Goal:** Build a business that generates £30k/month profit — working with Claude to learn and build toward this
+- **Working solo** — no team, so explanations should be clear but not overly long
+- **Tech level:** Moderate — can follow code but not expert-level, prefers things explained in plain English when needed
+- **Style preference:** Usually simple and clean, but open to advanced dashboards/features when it adds real value
+- **Big note:** Khalid hates having to re-explain everything each session — this file exists to prevent that
 
-## Project Summary
+## Current Project Status
 
-- **Stack:** Next.js (App Router), plain CSS
-- **Focus:** Manchester-based cleaning and security recruitment
-- **Pages:** `/` Home, `/employers`, `/candidates`, `/contact`
-- **Jobs data:** `data/jobs.js` (edit to add/remove roles)
-- **Form submissions:** Google Sheets via Apps Script (URLs go in `lib/constants.js`)
-- **Deployment target:** Vercel
+- **Sentinel Recruitment Group website — DROPPED.** No longer pursuing this business.
+- This repo may be repurposed or left as-is
+
+## The Real Goal
+
+Khalid is focused on **learning to build things** and eventually launching a business generating **£30k/month profit**.
+- We are in early/learning phase
+- Claude should help Khalid learn as we build, not just do everything silently
+- Business ideas, tech stack choices, and strategy are all open for discussion
 
 ## Key Files
 
@@ -41,9 +49,10 @@ Claude Code reads it automatically at session start.
 ## Session Log
 
 ### 2026-06-22
-- Created this CLAUDE.md memory file
-- Project is a Next.js recruitment site for Sentinel Recruitment Group, Manchester
-- User requested persistent memory system — solved via CLAUDE.md
+- Created CLAUDE.md persistent memory system
+- Khalid dropped Sentinel Recruitment Group — pivoting to building something new
+- Core mission: help Khalid learn + build a business to £30k/month profit
+- Khalid works solo, moderate tech level, hates re-explaining context each session
 
 ---
 
