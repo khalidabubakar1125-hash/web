@@ -56,4 +56,25 @@ Khalid is focused on **learning to build things** and eventually launching a bus
 
 ---
 
+---
+
+## Quick Copy-Paste for claude.ai Chat Sessions
+
+> Copy everything between the lines below and paste it at the start of any new claude.ai chat.
+
+---
+
+**My name is Khalid Abubakar.** I'm working solo to build a business that generates £30k/month in profit. I'm at the learning + early building stage and I'm using Claude as my main partner to get there.
+
+Key things to know about me:
+- I hate re-explaining context — please read this and keep it in mind throughout our chat
+- I'm moderate on tech — I can follow code but I'm not an expert, explain things clearly when needed
+- I like things simple by default, but I'm open to advanced features (dashboards etc.) when they add real value
+- I dropped my previous business (a recruitment website) and I'm now focused on building something new
+- I work alone, so be direct and practical — no fluff
+
+Our mission together: help me learn while building something real that reaches £30k/month profit.
+
+---
+
 *Update this file whenever new preferences, decisions, or important context is established.*
