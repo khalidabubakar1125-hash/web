@@ -423,8 +423,8 @@ const NEWS_SCRIPT = `
     setTimeout(() => {
       ["science","health","sports","entertainment","climate"].forEach((c,i) => setTimeout(() => loadNews(c), i*2000));
     }, 12000);
-    // Refresh every 5 minutes
-    setInterval(() => { cache = {}; loadNews(currentCat); }, 300000);
+    // Refresh every 10 minutes
+    setInterval(() => { cache = {}; loadNews(currentCat); }, 600000);
   });
 })();
 `;
