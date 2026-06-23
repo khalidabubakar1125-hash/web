@@ -1,5 +1,5 @@
 export const metadata = {
-  title: "World News Center",
+  title: "Global News Hub",
   description: "Live world news across every category, optimized for mobile.",
 };
 
@@ -53,7 +53,7 @@ function NewsApp() {
         .header-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
         .logo-area { display: flex; align-items: center; gap: 10px; }
         .logo-icon { width: 38px; height: 38px; background: linear-gradient(135deg, #ff4d6d, #7b2fff); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; }
-        .logo-text { font-size: 18px; font-weight: 800; background: linear-gradient(90deg, #4cc9f0, #7b2fff, #ff4d6d); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+        .logo-text { font-size: 16px; font-weight: 800; background: linear-gradient(90deg, #4cc9f0, #7b2fff, #ff4d6d); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
         .live-badge { display: flex; align-items: center; gap: 5px; background: rgba(255,77,109,0.2); border: 1px solid rgba(255,77,109,0.5); border-radius: 20px; padding: 4px 10px; font-size: 11px; color: var(--accent1); font-weight: 700; }
         .live-dot { width: 7px; height: 7px; background: var(--accent1); border-radius: 50%; animation: pulse 1.2s infinite; }
         @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(1.3)} }
@@ -352,7 +352,7 @@ const NEWS_SCRIPT = `
       '<div class="header-top">' +
         '<div class="logo-area">' +
           '<div class="logo-icon">🌐</div>' +
-          '<span class="logo-text">WORLD NEWS CENTER</span>' +
+          '<span class="logo-text">GLOBAL NEWS HUB</span>' +
         '</div>' +
         '<div class="live-badge"><div class="live-dot"></div>LIVE</div>' +
       '</div>' +

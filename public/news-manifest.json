@@ -1,6 +1,6 @@
 {
-  "name": "World News Center",
-  "short_name": "World News",
+  "name": "Global News Hub",
+  "short_name": "Global News",
   "description": "Live world news across every category",
   "start_url": "/news",
   "display": "standalone",

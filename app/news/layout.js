@@ -1,10 +1,10 @@
 export const metadata = {
-  title: "World News Center",
+  title: "Global News Hub",
   description: "Live breaking world news — politics, tech, science, sports, business, health, climate & more.",
   manifest: "/news-manifest.json",
   appleWebApp: {
     capable: true,
-    title: "World News",
+    title: "Global News Hub",
     statusBarStyle: "black-translucent",
   },
   other: {
