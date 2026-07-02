@@ -1,0 +1,128 @@
+# Brightside Dental, Manchester — demo practice config.
+# This file is the ONLY place practice-specific facts should live.
+# To onboard a new client: copy this file, fill it in, run `npm run create-assistant -- <slug>`.
+# See docs/RUNBOOK.md for the full step-by-step.
+
+slug: brightside-demo
+name: "Brightside Dental"
+legalName: "Brightside Dental Practice Ltd"
+city: "Manchester"
+address: "14 Oakfield Road, Manchester"
+postcode: "M20 6QP"
+phoneDisplay: "0161 000 0000"
+parkingInfo: >
+  There's free on-site parking for patients at the rear of the surgery, accessed
+  from Oakfield Road, plus additional pay-and-display parking on Wilmslow Road
+  a short walk away.
+timezone: "Europe/London"
+
+openingHours:
+  mon: { open: "08:30", close: "17:30" }
+  tue: { open: "08:30", close: "17:30" }
+  wed: { open: "08:30", close: "17:30" }
+  thu: { open: "08:30", close: "17:30" }
+  fri: { open: "08:30", close: "17:30" }
+  sat: { open: "09:00", close: "13:00" }
+  sun: null
+
+dentists:
+  - name: "Dr Aisha Khan"
+    role: "Principal Dentist"
+  - name: "Dr Tom Ellery"
+    role: "Dentist"
+  - name: "Chloe Marsh"
+    role: "Dental Hygienist"
+
+treatments:
+  - id: new-patient-exam
+    name: "New patient exam"
+    priceDisplay: "£65"
+    category: private
+    durationMinutes: 45
+    notes: "Full examination, X-rays if needed, and a personalised treatment plan."
+  - id: check-up
+    name: "Check-up"
+    priceDisplay: "£45"
+    category: private
+    durationMinutes: 20
+  - id: hygiene
+    name: "Hygiene appointment"
+    priceDisplay: "£75"
+    category: private
+    durationMinutes: 30
+    notes: "Scale and polish with Chloe, our hygienist."
+  - id: white-filling
+    name: "White filling"
+    priceDisplay: "from £120"
+    category: private
+    durationMinutes: 40
+    notes: "Final price depends on the size and location of the filling, confirmed at exam."
+  - id: emergency
+    name: "Emergency appointment"
+    priceDisplay: "£95"
+    category: private
+    durationMinutes: 30
+    notes: "Same-day where possible for pain, swelling, trauma or a knocked-out tooth."
+  - id: whitening
+    name: "Teeth whitening"
+    priceDisplay: "£295"
+    category: private
+    durationMinutes: 60
+  - id: invisalign-consultation
+    name: "Invisalign consultation"
+    priceDisplay: "Free"
+    category: private
+    durationMinutes: 30
+  - id: nhs-band-1
+    name: "NHS Band 1 (exam, diagnosis, prevention)"
+    priceDisplay: "£25.80"
+    category: nhs
+    durationMinutes: 20
+  - id: nhs-band-2
+    name: "NHS Band 2 (Band 1 plus fillings, extractions, root canal)"
+    priceDisplay: "£70.70"
+    category: nhs
+    durationMinutes: 40
+  - id: nhs-band-3
+    name: "NHS Band 3 (Band 1 & 2 plus crowns, dentures, bridges)"
+    priceDisplay: "£306.80"
+    category: nhs
+    durationMinutes: 45
+
+nhsInfo: >
+  Brightside Dental is a mixed practice — we hold a limited number of NHS
+  places alongside private treatment. We are currently accepting new NHS
+  patients for children and for adults on a waiting-list basis; private
+  appointments are available immediately. NHS charges follow the standard
+  national band system (Band 1, 2 and 3).
+
+emergencyProtocol:
+  offersSameDaySlot: true
+  inHoursAdvice: >
+    Reassure the caller, offer the same-day emergency appointment (£95), and
+    take their name and best contact number so the practice can confirm the
+    exact time.
+  outOfHoursAdvice: >
+    If the surgery is closed, advise the caller to call NHS 111 for urgent
+    dental advice and out-of-hours emergency dental services, and offer to
+    take a message so the practice can follow up on the next working day.
+  criticalAdvice: >
+    If there is swelling affecting breathing or swallowing, uncontrolled
+    bleeding that won't stop with pressure, or a serious facial injury,
+    advise the caller to call 999 or go to A&E immediately.
+
+bookingRules:
+  newPatientsRequireExam: true
+  cancellationNoticeHours: 24
+  depositRequiredTreatmentIds: []
+
+voice:
+  provider: playht
+  voiceId: jennifer
+
+# vapi.assistantId / vapi.phoneNumberId are written here automatically by
+# `npm run create-assistant -- brightside-demo` — leave empty until then.
+vapi: {}
+
+# sms.fromNumber overrides the global TWILIO_PHONE_NUMBER for this practice; leave empty to use the default.
+sms: {}

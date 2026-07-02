@@ -1,0 +1,31 @@
+{
+  "name": "dental-receptionist",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI voice receptionist for UK dental practices, built on Vapi. Config-driven, multi-practice ready.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server/index.ts",
+    "start": "tsx src/server/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx scripts/seed-db.ts",
+    "create-assistant": "tsx src/assistant/cli.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fastify": "^5.9.0",
+    "js-yaml": "^4.1.0",
+    "twilio": "^5.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}
