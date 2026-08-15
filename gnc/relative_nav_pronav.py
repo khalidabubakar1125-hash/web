@@ -94,6 +94,32 @@ TYPE_MASK_VELOCITY_YAWRATE = (
     | TM_IGNORE_YAW
 )  # == 1479
 
+# Command velocity + acceleration + yaw-rate. Feeding the ProNav acceleration
+# through as a feed-forward term lets the autopilot anticipate the manoeuvre
+# instead of differentiating our velocity command, which removes one lag pole
+# from the loop.
+#
+# Firmware caveat: acceleration targets in SET_POSITION_TARGET_LOCAL_NED are a
+# comparatively recent ArduPilot Copter feature and older firmware silently
+# ignores the acceleration fields rather than rejecting the packet -- the
+# vehicle simply flies the velocity term and you get no error. Confirm against
+# your Cube Orange's firmware version before relying on it, and keep
+# send_acceleration=False (the default) until you have.
+TYPE_MASK_VELOCITY_ACCEL_YAWRATE = (
+    TM_IGNORE_PX | TM_IGNORE_PY | TM_IGNORE_PZ
+    | TM_IGNORE_YAW
+)  # == 1031
+
+# ArduPilot Copter flight-mode numbers, used when handing authority back. The
+# live mapping is read from the vehicle at connect time; this table is the
+# fallback if the autopilot does not supply one.
+ARDUPILOT_COPTER_MODES = {
+    "STABILIZE": 0, "ACRO": 1, "ALT_HOLD": 2, "AUTO": 3, "GUIDED": 4,
+    "LOITER": 5, "RTL": 6, "CIRCLE": 7, "LAND": 9, "DRIFT": 11,
+    "SPORT": 13, "FLIP": 14, "AUTOTUNE": 15, "POSHOLD": 16, "BRAKE": 17,
+    "THROW": 18, "AVOID_ADSB": 19, "GUIDED_NOGPS": 20, "SMART_RTL": 21,
+}
+
 # Rotation from the REP-103 optical camera frame into BODY FRD.
 #   body_x (fwd)   <-  cam_z (fwd)
 #   body_y (right) <-  cam_x (right)
@@ -219,6 +245,11 @@ class LinkConfig:
     target_system: int = 1
     target_component: int = 1
     heartbeat_hz: float = 2.0
+
+    # Include the ProNav acceleration as a feed-forward term in the setpoint.
+    # Off by default: older Copter firmware ignores the acceleration fields
+    # silently, so enabling it without checking buys nothing and hides the fact.
+    send_acceleration: bool = False
 
 
 @dataclass
@@ -878,6 +909,22 @@ class MavlinkVelocityBridge:
         self._rate_lock = threading.Lock()
         self._boot_time = time.monotonic()
 
+        # Vehicle state latched from the inbound stream. Guarded by its own
+        # lock, never by the transmit lock: the safety supervisor reads this on
+        # every tick and must never queue behind a serial write.
+        self._state_lock = threading.Lock()
+        self._last_heartbeat_time = 0.0
+        self._custom_mode: Optional[int] = None
+        self._base_mode = 0
+        self._armed = False
+        self._gps_fix_type = 0
+        self._satellites = 0
+        self._ekf_flags: Optional[int] = None
+        self._messages_received = 0
+        self._setpoints_sent = 0
+        self._transmit_failures = 0
+
+        self._mode_mapping: dict = dict(ARDUPILOT_COPTER_MODES)
         self._master: Optional[mavutil.mavfile] = None
 
     # -- Lifecycle ----------------------------------------------------------
@@ -906,6 +953,24 @@ class MavlinkVelocityBridge:
                 self._cfg.target_system,
                 self._cfg.target_component,
             )
+            with self._state_lock:
+                self._last_heartbeat_time = time.monotonic()
+                self._custom_mode = getattr(hb, "custom_mode", None)
+                self._base_mode = getattr(hb, "base_mode", 0)
+
+            # Prefer the mapping the connected vehicle reports over our table:
+            # mode numbers differ between Copter, Plane and Rover.
+            try:
+                mapping = self._master.mode_mapping()
+                if mapping:
+                    self._mode_mapping = {str(k).upper(): int(v)
+                                          for k, v in mapping.items()}
+                    self._log.info("Loaded %d flight modes from the vehicle",
+                                   len(self._mode_mapping))
+            except Exception:
+                self._log.warning(
+                    "Vehicle did not supply a mode mapping; using the Copter table"
+                )
 
         self._running.set()
         self._spawn(self._heartbeat_loop, "mav-heartbeat")
@@ -951,26 +1016,70 @@ class MavlinkVelocityBridge:
 
     def _receive_loop(self) -> None:
         """Drain the inbound stream, latching body angular rates from ATTITUDE."""
-        while self._running.is_set():
-            try:
-                with self._lock:
-                    master = self._master
-                    msg = master.recv_match(blocking=False) if master is not None else None
-            except Exception:
-                self._log.warning("MAVLink receive error", exc_info=True)
-                time.sleep(0.05)
-                continue
+        # Drain a batch per lock acquisition rather than one message per
+        # acquisition. The transmit path shares this lock, so a message-at-a-
+        # time loop makes every setpoint write contend with the receiver on a
+        # busy link -- and on a GIL-bound runtime the churn preempts the
+        # detector thread as well.
+        batch_limit = 16
+        pending: List = []
 
-            if msg is None:
+        while self._running.is_set():
+            if not pending:
+                try:
+                    with self._lock:
+                        master = self._master
+                        if master is not None:
+                            for _ in range(batch_limit):
+                                message = master.recv_match(blocking=False)
+                                if message is None:
+                                    break
+                                pending.append(message)
+                except Exception:
+                    self._log.warning("MAVLink receive error", exc_info=True)
+                    time.sleep(0.05)
+                    continue
+
+            if not pending:
                 time.sleep(0.002)
                 continue
 
-            if msg.get_type() == "ATTITUDE":
+            msg = pending.pop(0)
+            kind = msg.get_type()
+            with self._state_lock:
+                self._messages_received += 1
+
+            if kind == "ATTITUDE":
                 with self._rate_lock:
                     self._body_rate = np.array(
                         [msg.rollspeed, msg.pitchspeed, msg.yawspeed],
                         dtype=np.float64,
                     )
+
+            elif kind == "HEARTBEAT":
+                # Ignore our own heartbeat echoed back by the router, and any
+                # other component on the bus: only the autopilot's counts.
+                if msg.get_srcSystem() != self._cfg.target_system:
+                    continue
+                if msg.get_srcComponent() != self._cfg.target_component:
+                    continue
+                armed = bool(
+                    msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                )
+                with self._state_lock:
+                    self._last_heartbeat_time = time.monotonic()
+                    self._custom_mode = int(msg.custom_mode)
+                    self._base_mode = int(msg.base_mode)
+                    self._armed = armed
+
+            elif kind == "GPS_RAW_INT":
+                with self._state_lock:
+                    self._gps_fix_type = int(msg.fix_type)
+                    self._satellites = int(msg.satellites_visible)
+
+            elif kind == "EKF_STATUS_REPORT":
+                with self._state_lock:
+                    self._ekf_flags = int(msg.flags)
 
     # -- Accessors ----------------------------------------------------------
 
@@ -998,18 +1107,56 @@ class MavlinkVelocityBridge:
 
     # -- Command path -------------------------------------------------------
 
-    def send_velocity_setpoint(self, velocity_body: np.ndarray, yaw_rate: float) -> bool:
-        """Transmit a BODY_NED velocity setpoint.
+    @staticmethod
+    def _sanitise(vector: Optional[np.ndarray]) -> Tuple[float, float, float]:
+        """Coerce a vector to three finite floats.
+
+        A NaN reaching the wire is worse than a wrong number: the packet still
+        checksums, the autopilot accepts it, and the controller poisons itself.
+        The estimator should never emit one, but this is the last gate before
+        the serial port and it costs nothing.
+        """
+        if vector is None:
+            return 0.0, 0.0, 0.0
+        out = []
+        for component in vector[:3]:
+            value = float(component)
+            out.append(value if math.isfinite(value) else 0.0)
+        while len(out) < 3:
+            out.append(0.0)
+        return out[0], out[1], out[2]
+
+    def send_velocity_setpoint(
+        self,
+        velocity_body: np.ndarray,
+        yaw_rate: float,
+        acceleration_body: Optional[np.ndarray] = None,
+    ) -> bool:
+        """Transmit a BODY_NED velocity (and optional acceleration) setpoint.
 
         MAV_FRAME_BODY_NED interprets the vector in the vehicle's forward /
         right / down axes, which is exactly the frame the estimator and the
         guidance law already work in -- no rotation into the local NED frame is
         required, and the command stays valid regardless of vehicle heading.
+
+        The acceleration fields are only populated when the link is configured
+        for it *and* a vector is supplied; otherwise their ignore bits stay set
+        so the autopilot cannot act on stale zeros.
         """
         if self._master is None:
             return False
 
-        vx, vy, vz = (float(component) for component in velocity_body)
+        vx, vy, vz = self._sanitise(velocity_body)
+        yaw_rate_value = float(yaw_rate) if math.isfinite(float(yaw_rate)) else 0.0
+
+        use_acceleration = self._cfg.send_acceleration and acceleration_body is not None
+        if use_acceleration:
+            ax, ay, az = self._sanitise(acceleration_body)
+            type_mask = TYPE_MASK_VELOCITY_ACCEL_YAWRATE
+        else:
+            ax = ay = az = 0.0
+            type_mask = TYPE_MASK_VELOCITY_YAWRATE
+
         elapsed_ms = int((time.monotonic() - self._boot_time) * 1e3) & 0xFFFFFFFF
 
         try:
@@ -1019,21 +1166,155 @@ class MavlinkVelocityBridge:
                     self._cfg.target_system,
                     self._cfg.target_component,
                     mavutil.mavlink.MAV_FRAME_BODY_NED,
-                    TYPE_MASK_VELOCITY_YAWRATE,
+                    type_mask,
                     0.0, 0.0, 0.0,          # position (ignored)
                     vx, vy, vz,             # velocity setpoint [m/s]
-                    0.0, 0.0, 0.0,          # acceleration (ignored)
+                    ax, ay, az,             # acceleration feed-forward [m/s^2]
                     0.0,                    # yaw (ignored)
-                    float(yaw_rate),        # yaw rate [rad/s]
+                    yaw_rate_value,         # yaw rate [rad/s]
                 )
+            with self._state_lock:
+                self._setpoints_sent += 1
             return True
         except Exception:
+            with self._state_lock:
+                self._transmit_failures += 1
             self._log.error("Failed to transmit velocity setpoint", exc_info=True)
             return False
 
     def send_hold(self) -> bool:
         """Command a zero-velocity hold -- the failsafe posture."""
         return self.send_velocity_setpoint(np.zeros(3, dtype=np.float64), 0.0)
+
+    # -- Mode control -------------------------------------------------------
+
+    def mode_number(self, mode_name: str) -> Optional[int]:
+        """Resolve a flight-mode name to the connected vehicle's mode number."""
+        return self._mode_mapping.get(mode_name.upper())
+
+    def current_mode_number(self) -> Optional[int]:
+        with self._state_lock:
+            return self._custom_mode
+
+    def _mode_name_for(self, number: Optional[int]) -> str:
+        """Resolve a mode number to a name. Takes no locks by design.
+
+        Callers that already hold ``_state_lock`` must use this rather than
+        current_mode_name(), which reacquires it.
+        """
+        if number is None:
+            return "UNKNOWN"
+        for name, value in self._mode_mapping.items():
+            if value == number:
+                return name
+        return f"MODE_{number}"
+
+    def current_mode_name(self) -> str:
+        """Human-readable current flight mode, or 'UNKNOWN'."""
+        return self._mode_name_for(self.current_mode_number())
+
+    def request_mode(self, mode_name: str) -> bool:
+        """Ask the autopilot to change flight mode. Does not wait for the change.
+
+        Sends DO_SET_MODE as a COMMAND_LONG rather than the legacy SET_MODE
+        message: the command form is acknowledged, so a rejected mode change is
+        visible in the log instead of vanishing.
+        """
+        if self._master is None:
+            return False
+        number = self.mode_number(mode_name)
+        if number is None:
+            self._log.error("Flight mode '%s' is not in the vehicle's mapping", mode_name)
+            return False
+
+        try:
+            with self._lock:
+                self._master.mav.command_long_send(
+                    self._cfg.target_system,
+                    self._cfg.target_component,
+                    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                    0,
+                    float(mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
+                    float(number),
+                    0.0, 0.0, 0.0, 0.0, 0.0,
+                )
+            self._log.warning("Requested flight mode %s (%d)", mode_name.upper(), number)
+            return True
+        except Exception:
+            self._log.error("Failed to send mode change to %s", mode_name, exc_info=True)
+            return False
+
+    def confirm_mode(self, mode_name: str, timeout_s: float) -> bool:
+        """Block until HEARTBEAT reports ``mode_name``, or the timeout expires.
+
+        Verification matters more than the request: a mode change can be refused
+        for reasons the companion computer cannot see (no GPS lock for LOITER,
+        no home position for RTL, a pre-arm check). Treating "sent" as "done"
+        would leave the supervisor believing it had handed over when it had not.
+        """
+        target = self.mode_number(mode_name)
+        if target is None:
+            return False
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.current_mode_number() == target:
+                return True
+            time.sleep(0.02)
+        return False
+
+    # -- Health -------------------------------------------------------------
+
+    def heartbeat_age(self) -> float:
+        """Seconds since the autopilot's last HEARTBEAT; inf if never seen."""
+        with self._state_lock:
+            last = self._last_heartbeat_time
+        return math.inf if last <= 0.0 else (time.monotonic() - last)
+
+    def is_armed(self) -> bool:
+        with self._state_lock:
+            return self._armed
+
+    def has_position_fix(self) -> bool:
+        """True when the GPS solution is good enough for LOITER or RTL.
+
+        Fix type 3 is a 3D fix. Position-holding modes will be refused without
+        one, so the supervisor must know before it picks a fallback mode --
+        commanding LOITER indoors achieves nothing except burning a second of
+        the failsafe budget.
+        """
+        with self._state_lock:
+            return self._gps_fix_type >= 3 and self._satellites >= 6
+
+    def link_status(self) -> dict:
+        """Snapshot of link and vehicle state.
+
+        The mode name is resolved after the lock is released: resolving it
+        inside would reacquire ``_state_lock`` through current_mode_name() and
+        deadlock, since it is a plain Lock rather than an RLock.
+        """
+        with self._state_lock:
+            last_heartbeat = self._last_heartbeat_time
+            custom_mode = self._custom_mode
+            armed = self._armed
+            fix_type = self._gps_fix_type
+            satellites = self._satellites
+            received = self._messages_received
+            sent = self._setpoints_sent
+            failures = self._transmit_failures
+
+        return {
+            "heartbeat_age_s": (
+                math.inf if last_heartbeat <= 0.0
+                else time.monotonic() - last_heartbeat
+            ),
+            "mode": self._mode_name_for(custom_mode),
+            "armed": armed,
+            "gps_fix_type": fix_type,
+            "satellites": satellites,
+            "messages_received": received,
+            "setpoints_sent": sent,
+            "transmit_failures": failures,
+        }
 
 
 # ---------------------------------------------------------------------------

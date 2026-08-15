@@ -588,11 +588,16 @@ class AsyncCameraCapture:
         source: FrameSource,
         logger: logging.Logger,
         clock: Callable[[], float] = time.monotonic,
+        frame_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         self._cfg = config
         self._source = source
         self._log = logger
         self._clock = clock
+        # Invoked on the capture thread immediately after each frame is
+        # published. Intended for a safety watchdog, so it must be trivial --
+        # anything slow here becomes timestamp jitter on the next frame.
+        self._frame_callback = frame_callback
 
         self.slot = LatestFrameSlot()
         self._thread: Optional[threading.Thread] = None
@@ -691,6 +696,12 @@ class AsyncCameraCapture:
                     image=image,
                 )
             )
+
+            if self._frame_callback is not None:
+                try:
+                    self._frame_callback()
+                except Exception:
+                    self._log.error("Frame callback raised", exc_info=True)
 
     # -- Health -------------------------------------------------------------
 
@@ -1292,6 +1303,7 @@ class CameraMeasurementSource:
         logger: Optional[logging.Logger] = None,
         clock: Callable[[], float] = time.monotonic,
         source: Optional[FrameSource] = None,
+        frame_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         self._cfg = config
         self._log = logger or logging.getLogger("gnc.camera")
@@ -1304,7 +1316,9 @@ class CameraMeasurementSource:
 
         if source is None:
             source = self._build_source()
-        self._capture = AsyncCameraCapture(config.camera, source, self._log, clock)
+        self._capture = AsyncCameraCapture(
+            config.camera, source, self._log, clock, frame_callback=frame_callback
+        )
 
         self.measurements = MeasurementQueue(config.measurement_queue_depth)
         self._workers: List[DetectionWorker] = []
@@ -1385,6 +1399,14 @@ class CameraMeasurementSource:
 # Direct in-process bridge to the EKF
 # ---------------------------------------------------------------------------
 
+@dataclass
+class PumpResult:
+    """Outcome of one :meth:`CameraEkfBridge.pump` call."""
+
+    drained: int     # measurements taken off the queue
+    fused: int       # of those, how many the filter accepted
+
+
 class CameraEkfBridge:
     """Pumps camera measurements straight into the EKF's polar update.
 
@@ -1406,20 +1428,28 @@ class CameraEkfBridge:
         self.fused = 0
         self.rejected = 0
 
-    def pump(self, body_rate: np.ndarray) -> int:
+    def pump(self, body_rate: np.ndarray) -> "PumpResult":
         """Fuse everything the camera produced since the last cycle.
 
-        Returns the number of measurements accepted by the filter. Bounded work:
-        the queue is shallow by construction, so this cannot run long.
+        Reports arrivals and acceptances separately, because they are different
+        health signals: no arrivals means the sensor or detector has stopped,
+        while arrivals that are all rejected means the filter and the sensor
+        disagree. Collapsing the two would report a disagreeing filter as a dead
+        camera and send the operator hunting the wrong fault.
+
+        Bounded work: the queue is shallow by construction, so this cannot run
+        long regardless of how far behind the detector has fallen.
         """
+        drained = 0
         accepted = 0
         for measurement in self._source.drain():
+            drained += 1
             if self._ekf.fuse(measurement, body_rate):
                 accepted += 1
                 self.fused += 1
             else:
                 self.rejected += 1
-        return accepted
+        return PumpResult(drained=drained, fused=accepted)
 
 
 # ---------------------------------------------------------------------------
