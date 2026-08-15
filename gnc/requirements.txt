@@ -1,0 +1,21 @@
+# Autonomous inspection GNC engine -- runtime dependencies.
+#
+# On a Jetson, prefer the distro OpenCV over the pip wheel:
+#
+#     sudo apt install -y python3-numpy python3-opencv
+#     pip3 install pymavlink pyserial
+#
+# The pip `opencv-python` wheel is built WITHOUT GStreamer, which breaks
+# cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER) and therefore all MIPI capture.
+# Verify whichever build you end up with:
+#
+#     python3 -c "import cv2; print([l for l in cv2.getBuildInformation().split(chr(10)) if 'GStreamer' in l])"
+#
+# It must report YES.
+
+numpy>=1.21
+opencv-python>=4.5        # must be built with GStreamer; see note above
+pymavlink>=2.4.0
+pyserial>=3.5             # REQUIRED: pymavlink does not depend on it, and
+                          # without it /dev/ttyTHS1 fails with
+                          # "ModuleNotFoundError: No module named 'serial'"
