@@ -107,9 +107,23 @@ PLANT_TAU_S = 0.10              # First-order vehicle velocity-tracking lag
 # in 3 s needs the terminal configuration instead. Nothing here relaxes a
 # physical limit -- the 6 G and 120 mph saturations are untouched and still
 # bind.
-STANDOFF_M = 0.0                # Drive to contact, not to a standoff
-CLOSURE_GAIN = 2.2              # Commanded closure per metre of range error
-CLOSURE_SPEED_CAP = MAX_SPEED_MPS   # Let the airframe ceiling be the limiter
+# Rendezvous-and-hold, not fly-through intercept. The criterion is "within
+# 0.3 m at the 3 s mark", which asks the vehicle to arrive AND stay -- so the
+# axial channel is configured to arrest closure at a small standoff rather than
+# drive through the target. STANDOFF_M sits inside the 0.3 m window so the hold
+# point itself is a pass.
+STANDOFF_M = 0.15               # Hold point, inside the 0.3 m accuracy window
+CLOSURE_GAIN = 2.2              # Proportional gain inside the linear region
+CLOSURE_DECEL = 0.6 * MAX_ACCEL_MPS2   # Reserved for arresting closure
+CLOSURE_SPEED_CAP = MAX_SPEED_MPS      # Let the airframe ceiling be the limiter
+# The axial channel integrates acceleration into the velocity command, so it
+# tracks the square-root profile with a lag of closure_decel / closure_damping.
+# At the shipped damping of 2 that is 17 m/s of excess closure.
+CLOSURE_DAMPING = 12.0
+# Terminal hold: fade ProNav out over the last 2 m and let a tangential-velocity
+# damper hold station. See GuidanceConfig.pronav_fade_range_m.
+PRONAV_FADE_RANGE = 2.0
+TERMINAL_DAMPING = 14.0
 
 # Own-vehicle acceleration is now fed to the filter as a control input rather
 # than absorbed by the process noise, so the PSD covers only what is genuinely
@@ -120,7 +134,7 @@ PROCESS_NOISE_PSD = 9.0
 print(f"★ Starting Apex Aero SIL Batch Test: {NUM_DRONES} Instances at {LOOP_HZ}Hz ★")
 print(f"  profile: {INITIAL_GAP_M:.0f} m gap, {SIM_DURATION_SEC:.0f} s, "
       f"divergence max({DIVERGENCE_FLOOR_M:.0f} m, {DIVERGENCE_RANGE_FRAC:g}xrange), "
-      f"hit {HIT_THRESHOLD_M:.1f} m at closest approach")
+      f"hold {HIT_THRESHOLD_M:.1f} m at t={SIM_DURATION_SEC:.0f}s")
 print(f"  driving: LatencyCompensatedEKF + ProNavGuidance (N={NAV_CONSTANT_N}) "
       f"from inspection_gnc.py")
 
@@ -189,6 +203,10 @@ def run_single_drone_sim(drone_id: int) -> dict:
     guid_cfg.standoff_range_m = STANDOFF_M
     guid_cfg.closure_gain = CLOSURE_GAIN
     guid_cfg.closure_speed_mps = CLOSURE_SPEED_CAP
+    guid_cfg.closure_decel_mps2 = CLOSURE_DECEL
+    guid_cfg.closure_damping = CLOSURE_DAMPING
+    guid_cfg.pronav_fade_range_m = PRONAV_FADE_RANGE
+    guid_cfg.terminal_damping = TERMINAL_DAMPING
     guidance = ProNavGuidance(guid_cfg, _NULL_LOG)
 
     pending: list[tuple[float, np.ndarray]] = []      # (capture_time, rel_pos_body)
@@ -266,11 +284,15 @@ def run_single_drone_sim(drone_id: int) -> dict:
 
     final_miss_distance = float(np.linalg.norm(target_pos - drone_pos))
     rms_error = math.sqrt(sq_error_sum / error_samples) if error_samples else float("nan")
-    success = (not diverged) and (min_range <= HIT_THRESHOLD_M)
+    held_at_clock = final_miss_distance <= HIT_THRESHOLD_M
+    reached = min_range <= HIT_THRESHOLD_M
+    success = (not diverged) and held_at_clock
 
     return {
         "drone_id": drone_id,
         "success": 1 if success else 0,
+        "reached_0p3m": 1 if reached else 0,
+        "held_at_clock": 1 if held_at_clock else 0,
         "diverged": 1 if diverged else 0,
         "final_miss_meters": round(final_miss_distance, 4),
         "min_range_meters": round(min_range, 4),
@@ -337,7 +359,7 @@ def main() -> int:
     print(f"Total Drones Run:   {NUM_DRONES}")
     print(f"Engagement:         {INITIAL_GAP_M:.0f} m gap, {SIM_DURATION_SEC:.0f} s, "
           f"target {TARGET_SPEED_RANGE[0]:.0f}-{TARGET_SPEED_RANGE[1]:.0f} m/s")
-    print(f"Target Accuracy:    {HIT_THRESHOLD_M} meters")
+    print(f"Target Accuracy:    {HIT_THRESHOLD_M} meters, held at t={SIM_DURATION_SEC:.0f}s")
     print(f"Success Rate:       {success_rate}% ({successful_runs}/{NUM_DRONES} units)")
     print("-" * 62)
     print("ESTIMATOR (LatencyCompensatedEKF)")
@@ -359,11 +381,12 @@ def main() -> int:
     fixed_clock = int((miss <= HIT_THRESHOLD_M).sum())
     closest_pass = int((closest <= HIT_THRESHOLD_M).sum())
     overshot = int((closest < miss - 1e-9).sum())
-    print(f"  scored: hit <= {HIT_THRESHOLD_M} m at closest approach : "
+    print(f"  scored: still within {HIT_THRESHOLD_M} m at the t={SIM_DURATION_SEC:.0f}s "
+          f"clock (rendezvous and hold) : {fixed_clock:3d}/{NUM_DRONES}")
+    print(f"  reached {HIT_THRESHOLD_M} m at any point (closest approach)  : "
           f"{closest_pass:3d}/{NUM_DRONES}")
-    print(f"  for reference, at the fixed t={SIM_DURATION_SEC:.0f}s clock : "
-          f"{fixed_clock:3d}/{NUM_DRONES} "
-          f"({overshot} runs intercept then fly past before the clock)")
+    print(f"  overshot and were opening again by the clock             : "
+          f"{overshot:3d}/{NUM_DRONES}")
     sensor_floor = DIVERGENCE_RANGE_FRAC / (
         _TARGET_PRIOR.width_sigma_m / _TARGET_PRIOR.width_m)
     print("  divergence bound vs sensor floor: monocular sigma_r is 0.2 x range from")
@@ -380,6 +403,13 @@ def main() -> int:
           f"longest breach run: {int(breach.max())} steps")
     print(f"  own-acceleration control input: ON (process noise PSD "
           f"{PROCESS_NOISE_PSD:g}, the shipped default)")
+    print(f"  guidance: sqrt closure profile (a_dec {CLOSURE_DECEL:.1f} m/s^2, "
+          f"damping {CLOSURE_DAMPING:g}), ProNav faded below "
+          f"{STANDOFF_M + PRONAV_FADE_RANGE:.2f} m into a")
+    print(f"    tangential-velocity hold (gain {TERMINAL_DAMPING:g}). Both gains sit "
+          f"above the {1.0/PLANT_TAU_S:.0f} rad/s plant")
+    print("    bandwidth modelled here and must be re-validated against the real "
+          "airframe's velocity loop.")
     print("-" * 62)
     print(f"Sim Process Time:   {execution_time} seconds (Headless Data Mode)")
     print(f"Report Generated:   {os.path.abspath(csv_file)}")

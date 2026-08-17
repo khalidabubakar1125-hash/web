@@ -204,10 +204,29 @@ class GuidanceConfig:
     closure_gain: float = 0.8
     # Damping gain converting a closure-rate error into axial acceleration [1/s].
     closure_damping: float = 2.0
+    # Deceleration authority reserved for arresting closure [m/s^2]. Beyond the
+    # linear region the commanded closure is capped at the speed from which the
+    # vehicle can still stop within the range remaining, using this figure.
+    # Held below the 6 G structural limit so the lateral ProNav channel keeps
+    # authority of its own inside the same budget.
+    closure_decel_mps2: float = 0.6 * MAX_ACCEL_MPS2
 
     # First-order washout on the velocity integrator [s]. Bleeds the command
     # back toward zero if guidance stops being refreshed, preventing wind-up.
     command_washout_tau_s: float = 1.5
+
+    # Terminal blend. Proportional navigation is an intercept law: the LOS rate
+    # omega = (r x v) / r^2 carries a 1/r^2, so as range collapses it diverges
+    # on any residual lateral motion and amplifies estimator noise with it.
+    # Measured closing on a 0.15 m hold point, omega ran from 1.6 to 5.6 rad/s
+    # over the last half metre while the lateral command thrashed between 4 and
+    # 22 m/s^2, so range oscillated instead of settling. Below
+    # standoff + pronav_fade_range_m the ProNav channel fades out linearly and
+    # is replaced by damping on tangential relative velocity, which is what
+    # actually holds station. Above it, guidance is unchanged.
+    pronav_fade_range_m: float = 1.0
+    # Gain nulling tangential relative velocity in the terminal hold [1/s].
+    terminal_damping: float = 6.0
 
     # Yaw-rate servo that keeps the target inside the camera FOV.
     yaw_rate_gain: float = 1.6           # [1/s] on azimuth error
@@ -1106,6 +1125,52 @@ class ProNavGuidance:
         self._velocity_cmd = np.zeros(3, dtype=np.float64)
         self._engaged = False
 
+    def _stopping_limited_closure(self, range_error: float) -> float:
+        """Closure command that can still be arrested in the distance remaining.
+
+        A pure proportional law cannot rendezvous. Following r_dot = -p*r
+        demands a deceleration of p^2*r, so closing 40 m needs 194 m/s^2 at a
+        gain high enough to converge in 3 s -- over three times the 6 G limit.
+        The command saturates, the vehicle arrives with velocity it cannot shed,
+        and it flies through the target instead of stopping at it. Lowering the
+        gain until the deceleration fits leaves it short: at 1.21, the highest
+        feasible gain, 40 m still has 1.06 m outstanding after 3 s. No single
+        gain satisfies both ends.
+
+        The square-root law resolves that by commanding, at every range, the
+        fastest closure from which a full stop is still possible:
+
+            closure = sqrt(2 * a_dec * (error - linear_dist / 2))
+
+        with a proportional region within ``linear_dist = a_dec / p^2`` so the
+        command stays continuous and well behaved near the set point. The two
+        branches meet exactly at a_dec / p. This is the same construction
+        ArduPilot's position controller uses, for the same reason.
+
+        With the shipped inspection gains the linear region extends to ~55 m,
+        so default behaviour is unchanged; the square-root branch only engages
+        for the aggressive closure configurations that need it.
+
+        The profile is only as good as the loop that tracks it. The axial
+        channel integrates acceleration into the velocity command, so following
+        a reference that falls at a_dec leaves a steady-state lag of
+        a_dec / closure_damping. At the default damping of 2 that is 17 m/s of
+        excess closure -- enough to fly through the target. Configurations that
+        engage the square-root branch need closure_damping raised to match,
+        bounded above by the airframe's own velocity-tracking bandwidth.
+        """
+        p_gain = self._cfg.closure_gain
+        a_dec = self._cfg.closure_decel_mps2
+        if p_gain <= 0.0 or a_dec <= 0.0:
+            return p_gain * range_error
+
+        linear_dist = a_dec / (p_gain * p_gain)
+        if range_error > linear_dist:
+            return math.sqrt(2.0 * a_dec * (range_error - 0.5 * linear_dist))
+        if range_error < -linear_dist:
+            return -math.sqrt(2.0 * a_dec * (-range_error - 0.5 * linear_dist))
+        return p_gain * range_error
+
     def relax(self, dt: float) -> np.ndarray:
         """Bleed the standing command toward zero when guidance is inhibited."""
         tau = max(self._cfg.command_washout_tau_s, EPS)
@@ -1146,11 +1211,27 @@ class ProNavGuidance:
             self._cfg.nav_constant * effective_closure * np.cross(los_rate, los_unit)
         )
 
+        # Terminal blend: hand the lateral channel from ProNav to a station-
+        # keeping damper as the hold point is approached. ProNav nulls the LOS
+        # rate on the way in, which is what gets us here; holding position once
+        # here is a different job, and the 1/r^2 in the LOS rate makes ProNav
+        # actively bad at it.
+        fade_span = max(self._cfg.pronav_fade_range_m, EPS)
+        fade = float(np.clip((rng - self._cfg.standoff_range_m) / fade_span, 0.0, 1.0))
+        if fade < 1.0:
+            tangential = rel_vel - float(np.dot(rel_vel, los_unit)) * los_unit
+            # Sign, again: rel_vel is the target relative to us, so nulling the
+            # tangential component means accelerating *with* it to match the
+            # target's lateral drift, not against it. The same trap as the
+            # ProNav cross-product ordering, from the same sign convention.
+            accel_hold = self._cfg.terminal_damping * tangential
+            accel_pronav = fade * accel_pronav + (1.0 - fade) * accel_hold
+
         # Axial channel: drive range toward the standoff set point.
         range_error = rng - self._cfg.standoff_range_m
         desired_closure = float(
             np.clip(
-                self._cfg.closure_gain * range_error,
+                self._stopping_limited_closure(range_error),
                 -self._cfg.closure_speed_mps,
                 self._cfg.closure_speed_mps,
             )
