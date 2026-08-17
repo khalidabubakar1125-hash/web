@@ -156,7 +156,10 @@ class FilterConfig:
     """EKF tuning."""
 
     # Continuous-time white-noise-acceleration spectral density [m^2/s^5].
-    # Sized for a non-cooperative target capable of aggressive manoeuvres.
+    # Sized for a non-cooperative *target* capable of aggressive manoeuvres.
+    # Our own acceleration is fed in separately as a control input, so it does
+    # not need to be covered here; if you call predict/fuse without own_accel,
+    # raise this to cover your own airframe's manoeuvre envelope as well.
     process_noise_psd: float = 9.0
 
     # Initial covariance seeds for an unobserved track.
@@ -601,6 +604,7 @@ class FilterEpoch:
     state: np.ndarray
     cov: np.ndarray
     body_rate: np.ndarray
+    own_accel: np.ndarray
     measurement: Optional[Measurement]
 
 
@@ -698,7 +702,7 @@ class LatencyCompensatedEKF:
         self._initialised = True
         self._reject_streak = 0
         self._history.clear()
-        self._push_history(np.zeros(3), meas)
+        self._push_history(np.zeros(3), meas, np.zeros(3))
         self._log.info("Track initialised at range %.2f m", rng)
 
     # -- Models -------------------------------------------------------------
@@ -730,6 +734,42 @@ class LatencyCompensatedEKF:
         Adt2 = Adt @ Adt
         Adt3 = Adt2 @ Adt
         return np.eye(cls.DIM) + Adt + 0.5 * Adt2 + (1.0 / 6.0) * Adt3
+
+    @staticmethod
+    def _control_matrix(body_rate: np.ndarray, dt: float) -> np.ndarray:
+        """Discrete input matrix G (6x3) mapping own-vehicle acceleration.
+
+        Our own acceleration is *known*, not random. Left in the process noise
+        it inflates the covariance and drags the estimate: during a 6 G
+        manoeuvre the filter is being told "relative velocity may have changed
+        by some unknown amount" when in fact most of that change is our own and
+        is measured. Feeding it as a control input removes it from the
+        uncertainty budget entirely, leaving the process noise to cover only
+        what is genuinely unknown -- the target's manoeuvre.
+
+        For A = [[-Omega, I], [0, -Omega]] the blocks commute, so
+        exp(A*t) = [[E, t*E], [0, E]] with E = exp(-Omega*t), and
+
+            G = integral(0..dt) [ s*exp(-Omega*s) ; exp(-Omega*s) ] ds
+              = [ dt^2/2 I - dt^3/3 Omega + dt^4/8 Omega^2 ;
+                  dt   I - dt^2/2 Omega + dt^3/6 Omega^2 ]
+
+        truncated to the same order as the state transition. At dt = 1/60 the
+        Omega terms are a ~2% correction at 1 rad/s, but they cost two matrix
+        products and keep G consistent with F.
+        """
+        Omega = skew(body_rate)
+        Omega2 = Omega @ Omega
+        I3 = np.eye(3)
+
+        dt2, dt3, dt4 = dt * dt, dt * dt * dt, dt * dt * dt * dt
+        g_pos = (dt2 / 2.0) * I3 - (dt3 / 3.0) * Omega + (dt4 / 8.0) * Omega2
+        g_vel = dt * I3 - (dt2 / 2.0) * Omega + (dt3 / 6.0) * Omega2
+
+        G = np.zeros((LatencyCompensatedEKF.DIM, 3), dtype=np.float64)
+        G[IDX_POS, :] = g_pos
+        G[IDX_VEL, :] = g_vel
+        return G
 
     def _process_noise(self, dt: float) -> np.ndarray:
         """Discretised continuous white-noise-acceleration covariance."""
@@ -783,12 +823,23 @@ class LatencyCompensatedEKF:
         cov: np.ndarray,
         body_rate: np.ndarray,
         dt: float,
+        own_accel: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Single prediction step; returns fresh (state, covariance)."""
+        """Single prediction step; returns fresh (state, covariance).
+
+        ``own_accel`` is this vehicle's own acceleration in BODY FRD. The state
+        is the target *relative* to us, so our acceleration enters with a
+        negative sign: accelerating toward the target reduces the relative
+        velocity. Pass None (or zeros) to fall back to treating all relative
+        acceleration as process noise.
+        """
         if dt <= 0.0:
             return state, cov
         F = self._state_transition(body_rate, dt)
         new_state = F @ state
+        if own_accel is not None and np.any(own_accel):
+            G = self._control_matrix(body_rate, dt)
+            new_state = new_state - G @ np.asarray(own_accel, dtype=np.float64)
         new_cov = enforce_symmetry(F @ cov @ F.T + self._process_noise(dt))
         return new_state, new_cov
 
@@ -831,32 +882,44 @@ class LatencyCompensatedEKF:
         new_cov = enforce_symmetry(I_KH @ cov @ I_KH.T + K @ meas.R @ K.T)
         return new_state, new_cov, True
 
-    def _push_history(self, body_rate: np.ndarray, meas: Optional[Measurement]) -> None:
+    def _push_history(self, body_rate: np.ndarray, meas: Optional[Measurement],
+                      own_accel: Optional[np.ndarray] = None) -> None:
         self._history.append(
             FilterEpoch(
                 timestamp=self._epoch,
                 state=self._x.copy(),
                 cov=self._P.copy(),
                 body_rate=body_rate.copy(),
+                own_accel=(np.zeros(3) if own_accel is None
+                           else np.asarray(own_accel, dtype=np.float64).copy()),
                 measurement=meas,
             )
         )
 
     # -- Public API ---------------------------------------------------------
 
-    def predict_to(self, target_time: float, body_rate: np.ndarray) -> None:
-        """Advance the filter to ``target_time`` and record the epoch."""
+    def predict_to(self, target_time: float, body_rate: np.ndarray,
+                   own_accel: Optional[np.ndarray] = None) -> None:
+        """Advance the filter to ``target_time`` and record the epoch.
+
+        ``own_accel`` is recorded alongside the epoch so a later retrodiction
+        replays this interval with the acceleration that was actually in force
+        over it, not with whatever is current when the delayed sample lands.
+        """
         with self._lock:
             if not self._initialised:
                 return
             dt = target_time - self._epoch
             if dt <= 0.0:
                 return
-            self._x, self._P = self._predict_inplace(self._x, self._P, body_rate, dt)
+            self._x, self._P = self._predict_inplace(
+                self._x, self._P, body_rate, dt, own_accel
+            )
             self._epoch = target_time
-            self._push_history(body_rate, None)
+            self._push_history(body_rate, None, own_accel)
 
-    def fuse(self, meas: Measurement, body_rate: np.ndarray) -> bool:
+    def fuse(self, meas: Measurement, body_rate: np.ndarray,
+             own_accel: Optional[np.ndarray] = None) -> bool:
         """Fuse a (possibly stale) measurement, rewinding the filter as needed.
 
         Returns True if the sample was accepted into the track.
@@ -877,15 +940,17 @@ class LatencyCompensatedEKF:
             if meas.capture_time >= self._epoch:
                 # Sample is current or ahead: ordinary predict/update.
                 self._x, self._P = self._predict_inplace(
-                    self._x, self._P, body_rate, meas.capture_time - self._epoch
+                    self._x, self._P, body_rate,
+                    meas.capture_time - self._epoch, own_accel
                 )
                 self._epoch = meas.capture_time
-                accepted = self._fuse_at_current_epoch(meas, body_rate)
+                accepted = self._fuse_at_current_epoch(meas, body_rate, own_accel)
                 return accepted
 
-            return self._retrodict_and_replay(meas, body_rate)
+            return self._retrodict_and_replay(meas, body_rate, own_accel)
 
-    def _fuse_at_current_epoch(self, meas: Measurement, body_rate: np.ndarray) -> bool:
+    def _fuse_at_current_epoch(self, meas: Measurement, body_rate: np.ndarray,
+                               own_accel: Optional[np.ndarray] = None) -> bool:
         """Apply an update at the filter's present epoch, honouring the gate."""
         force = self._reject_streak >= self._cfg.max_consecutive_rejects
         new_x, new_P, accepted = self._update_inplace(
@@ -894,7 +959,7 @@ class LatencyCompensatedEKF:
 
         if not accepted:
             self._reject_streak += 1
-            self._push_history(body_rate, None)
+            self._push_history(body_rate, None, own_accel)
             return False
 
         if force:
@@ -906,10 +971,11 @@ class LatencyCompensatedEKF:
         self._x, self._P = new_x, new_P
         self._reject_streak = 0
         self._last_measurement_time = max(self._last_measurement_time, meas.capture_time)
-        self._push_history(body_rate, meas)
+        self._push_history(body_rate, meas, own_accel)
         return True
 
-    def _retrodict_and_replay(self, meas: Measurement, body_rate: np.ndarray) -> bool:
+    def _retrodict_and_replay(self, meas: Measurement, body_rate: np.ndarray,
+                              own_accel: Optional[np.ndarray] = None) -> bool:
         """Splice a delayed measurement into the past, then rebuild the present.
 
         Procedure:
@@ -938,7 +1004,7 @@ class LatencyCompensatedEKF:
         # (2) Roll forward to the exact capture instant using the body rate that
         #     was in effect over that interval.
         state, cov = self._predict_inplace(
-            state, cov, anchor.body_rate, meas.capture_time - cursor
+            state, cov, anchor.body_rate, meas.capture_time - cursor, anchor.own_accel
         )
         cursor = meas.capture_time
 
@@ -954,11 +1020,12 @@ class LatencyCompensatedEKF:
 
         # (4) Replay the tail of the buffer on top of the corrected past.
         replayed: List[FilterEpoch] = [
-            FilterEpoch(cursor, state.copy(), cov.copy(), anchor.body_rate.copy(), meas)
+            FilterEpoch(cursor, state.copy(), cov.copy(), anchor.body_rate.copy(),
+                        anchor.own_accel.copy(), meas)
         ]
         for epoch in list(self._history)[anchor_index + 1:]:
             state, cov = self._predict_inplace(
-                state, cov, epoch.body_rate, epoch.timestamp - cursor
+                state, cov, epoch.body_rate, epoch.timestamp - cursor, epoch.own_accel
             )
             cursor = epoch.timestamp
             if epoch.measurement is not None:
@@ -969,7 +1036,7 @@ class LatencyCompensatedEKF:
                     self._log.debug("Replay update skipped at t=%.4f", cursor)
             replayed.append(
                 FilterEpoch(cursor, state.copy(), cov.copy(), epoch.body_rate.copy(),
-                            epoch.measurement)
+                            epoch.own_accel.copy(), epoch.measurement)
             )
 
         # Rebuild the ring buffer: history up to the anchor, then the replay.
@@ -2771,7 +2838,8 @@ class CameraEkfBridge:
         self.fused = 0
         self.rejected = 0
 
-    def pump(self, body_rate: np.ndarray) -> "PumpResult":
+    def pump(self, body_rate: np.ndarray,
+             own_accel: Optional[np.ndarray] = None) -> "PumpResult":
         """Fuse everything the camera produced since the last cycle.
 
         Reports arrivals and acceptances separately, because they are different
@@ -2787,7 +2855,7 @@ class CameraEkfBridge:
         accepted = 0
         for measurement in self._source.drain():
             drained += 1
-            if self._ekf.fuse(measurement, body_rate):
+            if self._ekf.fuse(measurement, body_rate, own_accel):
                 accepted += 1
                 self.fused += 1
             else:
@@ -3392,6 +3460,12 @@ class InspectionEngine:
         self._worst_cycle_s = 0.0
         self._last_telemetry = 0.0
         self._last_mode_warning = 0.0
+        # Own acceleration handed to the estimator as a control input. The
+        # ProNav command from the previous cycle is the best cheap estimate of
+        # what the airframe is doing now; an IMU-derived acceleration (specific
+        # force with gravity removed) would be better still and can be
+        # substituted here without touching the filter.
+        self._last_commanded_accel = np.zeros(3, dtype=np.float64)
 
     # -- Lifecycle ----------------------------------------------------------
 
@@ -3511,12 +3585,13 @@ class InspectionEngine:
         #     covariance grows and FILTER_DIVERGED fires, which is the accurate
         #     description of that failure. Camera liveness is a separate signal
         #     fed from the capture thread (see the frame_callback above).
-        result = self._camera_bridge.pump(body_rate)
+        own_accel = self._last_commanded_accel
+        result = self._camera_bridge.pump(body_rate, own_accel)
         if result.drained > 0:
             self._supervisor.note_measurement()
 
         # (2) Bring the estimate to the current epoch.
-        self._ekf.predict_to(now, body_rate)
+        self._ekf.predict_to(now, body_rate, own_accel)
 
         # (3) Report estimator health to the watchdog. Only meaningful once a
         #     track exists; before that the covariance is the initial seed.
@@ -3545,6 +3620,7 @@ class InspectionEngine:
             velocity = solution.velocity_body
             acceleration = solution.accel_body
             yaw_rate = solution.yaw_rate
+        self._last_commanded_accel = np.asarray(acceleration, dtype=np.float64).copy()
 
         # (5) The authority gate. Both conditions, every cycle.
         if not self._supervisor.is_control_authorised():
